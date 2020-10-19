@@ -64,6 +64,10 @@ func (c *rolloutContext) rolloutBlueGreen() error {
 }
 
 func (c *rolloutContext) reconcileStableReplicaSet(activeSvc *corev1.Service) error {
+	rollout := c.rollout
+	newRS := c.newRS
+	removeScaleDown := true
+
 	if _, ok := activeSvc.Spec.Selector[v1alpha1.DefaultRolloutUniqueLabelKey]; !ok {
 		return nil
 	}
@@ -74,14 +78,34 @@ func (c *rolloutContext) reconcileStableReplicaSet(activeSvc *corev1.Service) er
 	}
 
 	c.log.Infof("Reconciling stable ReplicaSet '%s'", activeRS.Name)
-	if replicasetutil.HasScaleDownDeadline(activeRS) {
-		// SetScaleDownDeadlineAnnotation should be removed from the new RS to ensure a new value is set
-		// when the active service changes to a different RS
-		err := c.removeScaleDownDelay(activeRS)
-		if err != nil {
-			return err
+
+	// Get the status of the post promotion run if it exists
+	if rollout.Spec.Strategy.BlueGreen.PostPromotionAnalysis != nil {
+		currentPostPromotionAnalysisRun := c.currentArs.BlueGreenPostPromotion
+		if currentPostPromotionAnalysisRun != nil {
+			if currentPostPromotionAnalysisRun.Status.Phase == "Failed" {
+				removeScaleDown = false
+			}
 		}
 	}
+
+	_, ok := activeRS.Annotations[v1alpha1.DefaultReplicaSetScaleDownDeadlineAnnotationKey]
+
+	// if there is no post promotion, always remove the scale down on the active rs
+
+	// but if there is a post promotion that fails, check if the new rs is equal to the active rs
+	// if they are equal, the annotation should remain and not be removed
+	if (ok && removeScaleDown) || (ok && !removeScaleDown && newRS.UID != activeRS.UID) {
+		// SetScaleDownDeadlineAnnotation should be removed from the new RS to ensure a new value is set
+		// when the active service changes to a different RS
+		if replicasetutil.HasScaleDownDeadline(activeRS) {
+			err := c.removeScaleDownDelay(activeRS)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
 	_, _, err := c.scaleReplicaSetAndRecordEvent(activeRS, defaults.GetReplicasOrDefault(c.rollout.Spec.Replicas))
 	return err
 }
@@ -244,6 +268,20 @@ func (c *rolloutContext) syncRolloutStatusBlueGreen(previewSvc *corev1.Service, 
 		c.SetRestartedAt()
 		newStatus.BlueGreen.PrePromotionAnalysisRunStatus = nil
 		newStatus.BlueGreen.PostPromotionAnalysisRunStatus = nil
+	}
+
+	// when the rollout is aborted
+	// place a scale down annotation on the new replica set
+	// if it currently does not have one and its current replicas is greater than 0
+	if c.pauseContext.IsAborted() {
+		_, ok := c.newRS.Annotations[v1alpha1.DefaultReplicaSetScaleDownDeadlineAnnotationKey]
+
+		if replicasetutil.GetReplicaCountForReplicaSets([]*appsv1.ReplicaSet{c.newRS}) > 0 && !ok {
+			err := c.addScaleDownDelay(c.newRS)
+			if err != nil {
+				return err
+			}
+		}
 	}
 
 	previewSelector := serviceutil.GetRolloutSelectorLabel(previewSvc)

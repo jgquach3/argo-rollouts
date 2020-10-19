@@ -1926,6 +1926,8 @@ func TestAbortRolloutOnErrorPrePromotionAnalysis(t *testing.T) {
 	f.replicaSetLister = append(f.replicaSetLister, rs1, rs2)
 	f.serviceLister = append(f.serviceLister, activeSvc)
 
+	// replica set gets patched with the scale down annotation in an aborted rollout
+	f.expectPatchReplicaSetAction(rs2)
 	patchIndex := f.expectPatchRolloutActionWithPatch(r2, OnlyObservedGenerationPatch)
 	f.run(getKey(r2, t))
 	patch := f.getPatchedRollout(patchIndex)
@@ -2144,6 +2146,8 @@ func TestAbortRolloutOnErrorPostPromotionAnalysis(t *testing.T) {
 	f.replicaSetLister = append(f.replicaSetLister, rs1, rs2)
 	f.serviceLister = append(f.serviceLister, activeSvc)
 
+	// replica set gets patched with the scale down annotation in an aborted rollout
+	f.expectPatchReplicaSetAction(rs2)
 	patchIndex := f.expectPatchRolloutActionWithPatch(r2, OnlyObservedGenerationPatch)
 	f.run(getKey(r2, t))
 	patch := f.getPatchedRollout(patchIndex)

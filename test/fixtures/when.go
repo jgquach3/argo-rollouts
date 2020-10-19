@@ -3,6 +3,8 @@ package fixtures
 import (
 	"encoding/json"
 	"fmt"
+	appsv1 "k8s.io/api/apps/v1"
+	patchtypes "k8s.io/apimachinery/pkg/types"
 	"strconv"
 	"time"
 
@@ -212,6 +214,64 @@ func (w *When) WaitForRolloutReplicas(count int32) *When {
 		return ro.Status.Replicas == count
 	}
 	return w.WaitForRolloutCondition(checkStatus, fmt.Sprintf("status.replicas=%d", count), E2EWaitTimeout)
+}
+
+// replace preview replica set annotation
+func (w *When) ReplacePreviewReplicaSetAnnotation(key string, value string) *When {
+	rs := w.GetReplicaSetFromServiceType("preview")
+	w.log.Infof("Replacing preview replica set: %s annotation: %s", rs.Name, key)
+
+	replaceScaleDownAtAnnotationsPatch := `[{ "op": "replace", "path": "/metadata/annotations/%s", "value": "%s"}]`
+	patch := fmt.Sprintf(replaceScaleDownAtAnnotationsPatch, key, value)
+
+	_, err := w.kubeClient.AppsV1().ReplicaSets(rs.Namespace).Patch(w.Context, rs.Name, patchtypes.JSONPatchType, []byte(patch), metav1.PatchOptions{})
+	w.CheckError(err)
+	return w
+}
+
+func (w *When) WaitForReplicaSetScaleDown(serviceType string) *When {
+	w.log.Infof("Waiting for %s replica set to scale down", serviceType)
+	rs := w.GetReplicaSetFromServiceType(serviceType)
+
+	checkStatus := func(rs *appsv1.ReplicaSet) bool {
+		if *rs.Spec.Replicas == 0 {
+			return true
+		}
+		return false
+	}
+
+	return w.WaitForReplicaSetCondition(checkStatus, rs.Name, fmt.Sprintf("replica set:%s scaled down", rs.Name), E2EWaitTimeout)
+}
+
+func (w *When) WaitForReplicaSetCondition(test func(rs *appsv1.ReplicaSet) bool, name string, condition string, timeout time.Duration) *When {
+	start := time.Now()
+	w.log.Infof("Waiting for condition: %s", condition)
+
+	opts := metav1.ListOptions{FieldSelector: fields.ParseSelectorOrDie(fmt.Sprintf("metadata.name=%s", name)).String()}
+	watch, err := w.kubeClient.AppsV1().ReplicaSets(w.namespace).Watch(w.Context, opts)
+	w.CheckError(err)
+	defer watch.Stop()
+	timeoutCh := make(chan bool, 1)
+	go func() {
+		time.Sleep(timeout)
+		timeoutCh <- true
+	}()
+	for {
+		select {
+		case event := <-watch.ResultChan():
+			rs, ok := event.Object.(*appsv1.ReplicaSet)
+			if ok {
+				if test(rs) {
+					w.log.Infof("Condition '%s' met after %v", condition, time.Since(start).Truncate(time.Second))
+					return w
+				}
+			} else {
+				w.t.Fatal("not ok")
+			}
+		case <-timeoutCh:
+			w.t.Fatalf("timeout after %v waiting for condition %s", timeout, condition)
+		}
+	}
 }
 
 func (w *When) WaitForActiveRevision(revision string) *When {

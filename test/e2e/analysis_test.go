@@ -4,10 +4,13 @@ package e2e
 
 import (
 	"fmt"
+	"github.com/argoproj/argo-rollouts/pkg/apis/rollouts/v1alpha1"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/suite"
+	appsv1 "k8s.io/api/apps/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/argoproj/argo-rollouts/test/fixtures"
 )
@@ -25,6 +28,13 @@ func (s *AnalysisSuite) SetupSuite() {
 	// shared analysis templates for suite
 	s.ApplyManifests("@functional/analysistemplate-web-background.yaml")
 	s.ApplyManifests("@functional/analysistemplate-sleep-job.yaml")
+}
+
+// helper to count replicas in spec
+func countReplicaSpec(count int32) fixtures.ReplicaSetExpectation {
+	return func(rs *appsv1.ReplicaSet) bool {
+		return *rs.Spec.Replicas == count
+	}
 }
 
 // convenience to generate a new service with a given name
@@ -226,11 +236,15 @@ spec:
 		When().
 		UpdateSpec().
 		WaitForRolloutStatus("Degraded").
+		ReplacePreviewReplicaSetAnnotation(v1alpha1.DefaultReplicaSetScaleDownDeadlineAnnotationKey, metav1.Now().UTC().Format(time.RFC3339)).
+		WaitForReplicaSetScaleDown("preview").
 		Then().
 		ExpectAnalysisRunCount(1).
 		ExpectStableRevision("1").
 		ExpectActiveRevision("1").
-		ExpectPreviewRevision("2")
+		ExpectPreviewRevision("2").
+		ExpectReplicaSetCount("preview", "Preview replica set scaled down", countReplicaSpec(0)).
+		ExpectReplicaSetCount("active", "Active replica set no change", countReplicaSpec(2))
 }
 
 func (s *AnalysisSuite) TestBlueGreenPostPromotionFail() {
@@ -287,18 +301,22 @@ spec:
 		ExpectPreviewRevision("2").
 		When().
 		PromoteRollout().
-		Sleep(2 * time.Second). // checking service selectors too fast causes test to flake
+		Sleep(2*time.Second). // checking service selectors too fast causes test to flake
 		Then().
 		ExpectStableRevision("1").
 		ExpectActiveRevision("2").
 		ExpectPreviewRevision("2").
 		When().
 		WaitForRolloutStatus("Degraded").
+		ReplacePreviewReplicaSetAnnotation(v1alpha1.DefaultReplicaSetScaleDownDeadlineAnnotationKey, metav1.Now().UTC().Format(time.RFC3339)).
+		WaitForReplicaSetScaleDown("preview").
 		Then().
 		ExpectAnalysisRunCount(1).
 		ExpectStableRevision("1").
 		ExpectActiveRevision("1").
-		ExpectPreviewRevision("2")
+		ExpectPreviewRevision("2").
+		ExpectReplicaSetCount("preview", "Preview replica set scaled down", countReplicaSpec(0)).
+		ExpectReplicaSetCount("active", "Active replica set no change", countReplicaSpec(1))
 }
 
 // TestBlueGreenAbortThenUpdate tests the scenario:
@@ -373,7 +391,7 @@ spec:
 		WaitForRolloutStatus("Paused").
 		Then().
 		ExpectRevisionPodCount("1", 1).
-		ExpectRevisionPodCount("2", 0).
+		ExpectRevisionPodCount("2", 1).
 		ExpectRevisionPodCount("3", 1).
 		ExpectActiveRevision("1").
 		ExpectPreviewRevision("3").
@@ -382,11 +400,13 @@ spec:
 		WaitForRolloutStatus("Healthy").
 		Then().
 		ExpectRevisionPodCount("1", 1).
-		ExpectRevisionPodCount("2", 0).
+		ExpectRevisionPodCount("2", 1).
 		ExpectRevisionPodCount("3", 1).
 		ExpectActiveRevision("3").
 		ExpectPreviewRevision("3").
-		ExpectAnalysisRunCount(2)
+		ExpectAnalysisRunCount(2).
+		ExpectRevisionReplicaSetAnnotation("1", v1alpha1.DefaultReplicaSetScaleDownDeadlineAnnotationKey).
+		ExpectRevisionReplicaSetAnnotation("2", v1alpha1.DefaultReplicaSetScaleDownDeadlineAnnotationKey)
 }
 
 // TestBlueGreenKitchenSink various features of blue-green strategy

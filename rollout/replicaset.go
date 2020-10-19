@@ -70,16 +70,80 @@ func (c *Controller) getReplicaSetsForRollouts(r *v1alpha1.Rollout) ([]*appsv1.R
 	return cm.ClaimReplicaSets(rsList)
 }
 
+// helper to handle the replica set scale down time
+// if the scale down time has not passed, enqueue the rollout
+func (c *rolloutContext) determineReplicaSetCountWhenScaling(
+	targetRS *appsv1.ReplicaSet, defaultReplicaCount int32, desiredReplicaCount int32, scaleDownAtTime time.Time) int32 {
+	logCtx := c.log
+	rollout := c.rollout
+
+	now := metav1.Now()
+	scaleDownAt := metav1.NewTime(scaleDownAtTime)
+	if scaleDownAt.After(now.Time) {
+		remainingTime := scaleDownAt.Sub(now.Time)
+		if remainingTime < c.resyncPeriod {
+			// if the scale down time has not passed, enqueue the rollout
+			logCtx.Infof("RS '%s' has not reached the scaleDownTime", targetRS.Name)
+			c.enqueueRolloutAfter(rollout, remainingTime)
+		}
+		// set the replica count to be the desired replica count
+		return desiredReplicaCount
+	}
+	// if it's after the scale down time
+	return defaultReplicaCount
+}
+
 func (c *rolloutContext) reconcileNewReplicaSet() (bool, error) {
-	if c.newRS == nil {
+	logCtx := c.log
+	rollout := c.rollout
+	newRS := c.newRS
+	if newRS == nil {
 		return false, nil
 	}
-	c.log.Infof("Reconciling new ReplicaSet '%s'", c.newRS.Name)
-	newReplicasCount, err := replicasetutil.NewRSNewReplicas(c.rollout, c.allRSs, c.newRS)
+
+	newReplicasCount := int32(0)
+
+	logCtx.Infof("Reconciling new ReplicaSet '%s'", newRS.Name)
+	allRSs := c.allRSs
+
+	scaleDownAtStr, scaleDownAnnotationAvailable := newRS.Annotations[v1alpha1.DefaultReplicaSetScaleDownDeadlineAnnotationKey]
+
+	newIntendedReplicasCount, err := replicasetutil.NewRSNewReplicas(rollout, allRSs, newRS)
 	if err != nil {
 		return false, err
 	}
-	scaled, _, err := c.scaleReplicaSetAndRecordEvent(c.newRS, newReplicasCount)
+
+	// if canary, use the new intended replica count
+	// canary scales down downstream
+	if rollout.Spec.Strategy.Canary != nil {
+		newReplicasCount = newIntendedReplicasCount
+		scaled, _, err := c.scaleReplicaSetAndRecordEvent(newRS, newReplicasCount)
+		return scaled, err
+	}
+
+	// if blue green,
+
+	// if the scale down annotation exists or the the rollout is an aborted state
+	// will pass a replica count of 0 to the new rs (preview) to scale it down
+	// if the annotation does not exist, or the rollout is not aborted,
+	// use the intended replica number
+
+	// if the rollout is paused and then aborted (this is done through the kubectl argo plugin)
+	// use the intended replica number as the preview will be tagged with the
+	// scale down annotation downstream
+	if (!scaleDownAnnotationAvailable && !rollout.Status.Abort) || (rollout.Status.ControllerPause && rollout.Status.Abort) {
+		newReplicasCount = newIntendedReplicasCount
+	} else {
+		// check the time interval / delay to scale down
+		scaleDownAtTime, err := time.Parse(time.RFC3339, scaleDownAtStr)
+		if err != nil {
+			logCtx.Infof("No scaleDownAt label on new rs '%s'", newRS.Name)
+		} else {
+			newReplicasCount = c.determineReplicaSetCountWhenScaling(newRS, newReplicasCount, newIntendedReplicasCount, scaleDownAtTime)
+		}
+	}
+
+	scaled, _, err := c.scaleReplicaSetAndRecordEvent(newRS, newReplicasCount)
 	return scaled, err
 }
 

@@ -22,7 +22,7 @@ func TestFunctionalSuite(t *testing.T) {
 	suite.Run(t, new(FunctionalSuite))
 }
 
-func countReplicaSets(count int) fixtures.ReplicaSetExpectation {
+func countReplicaSets(count int) fixtures.ReplicaSetListExpectation {
 	return func(rsets *appsv1.ReplicaSetList) bool {
 		return len(rsets.Items) == count
 	}

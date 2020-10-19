@@ -139,6 +139,55 @@ func (c *Common) GetInlineAnalysisRun() *rov1.AnalysisRun {
 	return latest
 }
 
+// gets the current list of replica sets associated by the rollout selector
+func (c *Common) GetReplicaSets() *appsv1.ReplicaSetList {
+	selector, err := metav1.LabelSelectorAsSelector(c.Rollout().Spec.Selector)
+	c.CheckError(err)
+	replicaSets, err := c.kubeClient.AppsV1().ReplicaSets(c.namespace).List(c.Context, metav1.ListOptions{LabelSelector: selector.String()})
+
+	return replicaSets
+}
+
+// gets the replica set associated by the rollout selector and the service state (preview or active)
+func (c *Common) GetReplicaSetFromServiceType(serviceType string) *appsv1.ReplicaSet {
+	rsList := c.GetReplicaSets()
+
+	var serviceName string
+
+	switch serviceType {
+	case "preview":
+		serviceName = c.Rollout().Spec.Strategy.BlueGreen.PreviewService
+	case "active":
+		serviceName = c.Rollout().Spec.Strategy.BlueGreen.ActiveService
+	}
+
+	service, _ := c.kubeClient.CoreV1().Services(c.namespace).Get(c.Context, serviceName, metav1.GetOptions{})
+
+	if service == nil {
+		c.log.Error("No service was found")
+		c.t.FailNow()
+	}
+
+	var stateRS *appsv1.ReplicaSet
+	key := "rollouts-pod-template-hash"
+	previewHash := service.Spec.Selector[key]
+
+	for _, rs := range rsList.Items {
+		rsPodHash := rs.Spec.Selector.MatchLabels[key]
+		if rsPodHash == previewHash {
+			stateRS = &rs
+			break
+		}
+	}
+
+	if stateRS == nil {
+		c.log.Error("No replicaset was found")
+		c.t.FailNow()
+	}
+
+	return stateRS
+}
+
 // ApplyManifests kubectl applys the given YAML string or file path:
 // 1. A file name if it starts with "@"
 // 2. Raw YAML.

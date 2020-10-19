@@ -95,6 +95,16 @@ func (t *Then) ExpectRevisionPodCount(revision string, expectedCount int) *Then 
 	return t.expectPodCountByHash(description, hash, expectedCount)
 }
 
+func (t *Then) ExpectRevisionReplicaSetAnnotation(revision string, expectedAnnotation string) *Then {
+	rs := t.GetReplicaSetByRevision(revision)
+	if _, ok := rs.Annotations[expectedAnnotation]; !ok {
+		t.log.Errorf("Replicaset expectation failed, annotation: '%s' not available", expectedAnnotation)
+		t.t.FailNow()
+	}
+	t.log.Infof("Replicaset expectation annotation: '%s' available", expectedAnnotation)
+	return t
+}
+
 func (t *Then) expectPodCountByHash(description, hash string, expectedCount int) *Then {
 	return t.ExpectPods(fmt.Sprintf("%s pod count == %d", description, expectedCount), func(pods *corev1.PodList) bool {
 		count := 0
@@ -117,14 +127,28 @@ func (t *Then) expectPodCountByHash(description, hash string, expectedCount int)
 	})
 }
 
-type ReplicaSetExpectation func(*appsv1.ReplicaSetList) bool
+type ReplicaSetListExpectation func(*appsv1.ReplicaSetList) bool
 
-func (t *Then) ExpectReplicaSets(expectation string, expectFunc ReplicaSetExpectation) *Then {
+func (t *Then) ExpectReplicaSets(expectation string, expectFunc ReplicaSetListExpectation) *Then {
 	selector, err := metav1.LabelSelectorAsSelector(t.Rollout().Spec.Selector)
 	t.CheckError(err)
 	replicasets, err := t.kubeClient.AppsV1().ReplicaSets(t.namespace).List(t.Context, metav1.ListOptions{LabelSelector: selector.String()})
 	t.CheckError(err)
 	if !expectFunc(replicasets) {
+		t.log.Errorf("Replicaset expectation '%s' failed", expectation)
+		t.t.FailNow()
+	}
+	t.log.Infof("Replicaset expectation '%s' met", expectation)
+	return t
+}
+
+type ReplicaSetExpectation func(*appsv1.ReplicaSet) bool
+
+func (t *Then) ExpectReplicaSetCount(serviceType string, expectation string, expectFunc ReplicaSetExpectation) *Then {
+
+	replicaSet := t.GetReplicaSetFromServiceType(serviceType)
+
+	if !expectFunc(replicaSet) {
 		t.log.Errorf("Replicaset expectation '%s' failed", expectation)
 		t.t.FailNow()
 	}
